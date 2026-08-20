@@ -1,0 +1,90 @@
+# app.py
+from flask import Flask, render_template, request, jsonify
+import time
+from datetime import datetime
+import threading
+
+app = Flask(__name__)
+
+# In-memory storage for latest telemetry
+latest_data = {
+    "voltage": 0.0,
+    "current": 0.0,
+    "temperature": 0.0,
+    "battery_health": 100.0,
+    "timestamp": None,
+    "stale": True
+}
+
+# Lock for thread safety
+data_lock = threading.Lock()
+
+# Configurable thresholds
+THRESHOLDS = {
+    "voltage": {"min": 10.0, "max": 14.4, "warn_low": 11.5, "warn_high": 13.8},
+    "current": {"min": 0, "max": 50, "warn_high": 40},
+    "temperature": {"min": -10, "max": 80, "warn_high": 60},
+    "battery_health": {"min": 0, "max": 100, "warn_low": 30}
+}
+
+STALE_TIMEOUT = 10  # seconds after which data is considered stale
+
+def is_stale(timestamp):
+    if timestamp is None:
+        return True
+    return (time.time() - timestamp) > STALE_TIMEOUT
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/update', methods=['POST'])
+def update_telemetry():
+    try:
+        data = request.get_json(force=True)
+        
+        required_keys = ['voltage', 'current', 'temperature', 'battery_health']
+        if not all(k in data for k in required_keys):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        voltage = float(data['voltage'])
+        current = float(data['current'])
+        temp = float(data['temperature'])
+        health = float(data['battery_health'])
+
+        with data_lock:
+            latest_data.update({
+                "voltage": voltage,
+                "current": current,
+                "temperature": temp,
+                "battery_health": health,
+                "timestamp": time.time(),
+                "stale": False
+            })
+
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Data updated: {voltage}V, {current}A, {temp}°C, {health}%")
+        return jsonify({"status": "success"}), 200
+
+    except Exception as e:
+        print(f"Error in /update: {e}")
+        return jsonify({"error": str(e)}), 400
+
+@app.route('/api/data')
+def get_data():
+    with data_lock:
+        data_copy = latest_data.copy()
+        timestamp = data_copy["timestamp"]
+        data_copy["stale"] = is_stale(timestamp)
+        if timestamp:
+            data_copy["last_updated"] = datetime.fromtimestamp(timestamp).strftime('%H:%M:%S')
+        else:
+            data_copy["last_updated"] = "Never"
+        data_copy["timestamp"] = timestamp
+
+    return jsonify(data_copy)
+
+if __name__ == '__main__':
+    print("Telemetry Dashboard Server Starting...")
+    print("Visit: http://localhost:5000")
+    print("ESP32 should POST to: http://YOUR_PC_IP:5000/update")
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
